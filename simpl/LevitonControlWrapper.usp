@@ -1,0 +1,469 @@
+#SYMBOL_NAME "LevitonControlWrapper"
+#CATEGORY "29" // Lighting & Dimming
+#DEFAULT_VOLATILE
+#ENABLE_STACK_CHECKING
+#ENCODING "UTF-8"
+
+// ============================================
+// SIMPL+ Wrapper for Leviton Control Module
+// ============================================
+// This module provides SIMPL+ interface to the LevitonModule C# class
+// allowing control of Leviton switches, dimmers, and fans from SIMPL programs
+
+#DEFINE_CONSTANT DEVICE_TYPE_SWITCH 1
+#DEFINE_CONSTANT DEVICE_TYPE_DIMMER 2
+#DEFINE_CONSTANT DEVICE_TYPE_FAN 3
+
+#DEFINE_CONSTANT MAX_DEVICES 50
+#DEFINE_CONSTANT MAX_DEVICE_ID_LENGTH 256
+#DEFINE_CONSTANT MAX_DEVICE_NAME_LENGTH 256
+
+// Digital Inputs for initialization and control
+DIGITAL_INPUT Initialize, Shutdown;
+DIGITAL_INPUT _SKIP_;  
+
+// String inputs for device management
+STRING_INPUT DeviceIdInput[256], DeviceNameInput[256];
+DIGITAL_INPUT AddDeviceAsSwitch, AddDeviceAsDimmer, AddDeviceAsFan, RemoveDevice;
+
+// Control inputs for specific device types
+STRING_INPUT SwitchControlDeviceId[256];
+DIGITAL_INPUT SwitchOn, SwitchOff, SwitchToggle;
+
+STRING_INPUT DimmerControlDeviceId[256];
+ANALOG_INPUT DimmerLevel;  // 0-100
+DIGITAL_INPUT DimmerOn, DimmerOff;
+
+STRING_INPUT FanControlDeviceId[256];
+DIGITAL_INPUT FanOff, FanLow, FanMedium, FanHigh;
+
+// Digital/Analog Outputs for device status
+DIGITAL_OUTPUT InitializationComplete, ModuleError, IsConnected;
+DIGITAL_OUTPUT SwitchStateOutput[MAX_DEVICES];  // Parallel array output
+ANALOG_OUTPUT DimmerLevelOutput[MAX_DEVICES];   // Parallel array output
+ANALOG_OUTPUT FanSpeedOutput[MAX_DEVICES];      // 0=Off, 1=Low, 2=Medium, 3=High
+
+STRING_OUTPUT DeviceStatusOutput[MAX_DEVICES];
+STRING_OUTPUT ErrorMessageOutput;
+
+// ============================================
+// Global Variables
+// ============================================
+STRUCTURE s_Device
+{
+    INTEGER DeviceIndex;
+    STRING DeviceId[MAX_DEVICE_ID_LENGTH];
+    STRING DeviceName[MAX_DEVICE_NAME_LENGTH];
+    INTEGER DeviceType;
+    INTEGER LastKnownState;
+    INTEGER LastKnownLevel;
+};
+
+s_Device RegisteredDevices[MAX_DEVICES];
+INTEGER TotalDevices;
+INTEGER ModuleInitialized;
+
+// ============================================
+// Module Declaration (for future C# integration)
+// ============================================
+// This is a placeholder for the C# LevitonModule class
+// In production, uncomment and configure:
+// 
+// LevitonModule _levitonModule;
+// 
+// PUBLIC DELEGATE OnDeviceStateChanged(LevitonDevice device);
+// PUBLIC DELEGATE OnAuthenticationStateChanged(STRING message);
+//
+
+// ============================================
+// Initialize Function
+// ============================================
+FUNCTION InitializeModule()
+{
+    INTEGER i;
+    
+    IF(ModuleInitialized)
+    {
+        ErrorMessageOutput = "Module already initialized";
+        ModuleError = 1;
+        return;
+    }
+    
+    // Clear existing devices
+    TotalDevices = 0;
+    FOR(i = 1; i <= MAX_DEVICES; i = i + 1)
+    {
+        RegisteredDevices[i].DeviceIndex = 0;
+        RegisteredDevices[i].DeviceId = "";
+        RegisteredDevices[i].DeviceName = "";
+        RegisteredDevices[i].DeviceType = 0;
+        RegisteredDevices[i].LastKnownState = 0;
+        RegisteredDevices[i].LastKnownLevel = 0;
+        DeviceStatusOutput[i] = "Uninitialized";
+    }
+    
+    ModuleInitialized = 1;
+    InitializationComplete = 1;
+    IsConnected = 1;
+    ErrorMessageOutput = "Module initialized successfully";
+    ModuleError = 0;
+}
+
+// ============================================
+// Shutdown Function
+// ============================================
+FUNCTION ShutdownModule()
+{
+    INTEGER i;
+    
+    IF(!ModuleInitialized)
+    {
+        ErrorMessageOutput = "Module not initialized";
+        ModuleError = 1;
+        return;
+    }
+    
+    // Clear all device states
+    FOR(i = 1; i <= MAX_DEVICES; i = i + 1)
+    {
+        SwitchStateOutput[i] = 0;
+        DimmerLevelOutput[i] = 0;
+        FanSpeedOutput[i] = 0;
+        DeviceStatusOutput[i] = "";
+    }
+    
+    ModuleInitialized = 0;
+    InitializationComplete = 0;
+    IsConnected = 0;
+    ErrorMessageOutput = "Module shutdown complete";
+}
+
+// ============================================
+// Device Registration Functions
+// ============================================
+FUNCTION AddDevice(INTEGER deviceType)
+{
+    IF(!ModuleInitialized)
+    {
+        ErrorMessageOutput = "Module not initialized";
+        ModuleError = 1;
+        return;
+    }
+    
+    IF(TotalDevices >= MAX_DEVICES)
+    {
+        ErrorMessageOutput = "Maximum devices reached";
+        ModuleError = 1;
+        return;
+    }
+    
+    IF(DeviceIdInput = "" || DeviceNameInput = "")
+    {
+        ErrorMessageOutput = "Device ID and Name are required";
+        ModuleError = 1;
+        return;
+    }
+    
+    TotalDevices = TotalDevices + 1;
+    RegisteredDevices[TotalDevices].DeviceIndex = TotalDevices;
+    RegisteredDevices[TotalDevices].DeviceId = DeviceIdInput;
+    RegisteredDevices[TotalDevices].DeviceName = DeviceNameInput;
+    RegisteredDevices[TotalDevices].DeviceType = deviceType;
+    RegisteredDevices[TotalDevices].LastKnownState = 0;
+    RegisteredDevices[TotalDevices].LastKnownLevel = 0;
+    
+    DeviceStatusOutput[TotalDevices] = RegisteredDevices[TotalDevices].DeviceName;
+    ErrorMessageOutput = "Device added: " + DeviceNameInput;
+    ModuleError = 0;
+}
+
+FUNCTION RemoveDeviceByIndex(INTEGER index)
+{
+    INTEGER i;
+    
+    IF(index < 1 || index > TotalDevices)
+    {
+        ErrorMessageOutput = "Invalid device index";
+        ModuleError = 1;
+        return;
+    }
+    
+    // Shift remaining devices
+    FOR(i = index; i < TotalDevices; i = i + 1)
+    {
+        RegisteredDevices[i] = RegisteredDevices[i + 1];
+        RegisteredDevices[i].DeviceIndex = i;
+    }
+    
+    // Clear last device
+    RegisteredDevices[TotalDevices].DeviceIndex = 0;
+    RegisteredDevices[TotalDevices].DeviceId = "";
+    RegisteredDevices[TotalDevices].DeviceName = "";
+    RegisteredDevices[TotalDevices].DeviceType = 0;
+    DeviceStatusOutput[TotalDevices] = "";
+    
+    TotalDevices = TotalDevices - 1;
+    ErrorMessageOutput = "Device removed";
+    ModuleError = 0;
+}
+
+FUNCTION FindDeviceByIndex(STRING deviceId) RETURNS INTEGER
+{
+    INTEGER i;
+    
+    FOR(i = 1; i <= TotalDevices; i = i + 1)
+    {
+        IF(RegisteredDevices[i].DeviceId = deviceId)
+            return i;
+    }
+    
+    return 0;  // Device not found
+}
+
+// ============================================
+// Switch Control Functions
+// ============================================
+FUNCTION ControlSwitch(STRING deviceId, INTEGER state)
+{
+    INTEGER index;
+    
+    IF(!ModuleInitialized)
+    {
+        ErrorMessageOutput = "Module not initialized";
+        ModuleError = 1;
+        return;
+    }
+    
+    index = FindDeviceByIndex(deviceId);
+    
+    IF(index = 0)
+    {
+        ErrorMessageOutput = "Switch device not found: " + deviceId;
+        ModuleError = 1;
+        return;
+    }
+    
+    IF(RegisteredDevices[index].DeviceType <> DEVICE_TYPE_SWITCH)
+    {
+        ErrorMessageOutput = "Device is not a switch";
+        ModuleError = 1;
+        return;
+    }
+    
+    RegisteredDevices[index].LastKnownState = state;
+    SwitchStateOutput[index] = state;
+    
+    IF(state)
+        ErrorMessageOutput = "Switch ON: " + RegisteredDevices[index].DeviceName;
+    ELSE
+        ErrorMessageOutput = "Switch OFF: " + RegisteredDevices[index].DeviceName;
+    
+    ModuleError = 0;
+}
+
+// ============================================
+// Dimmer Control Functions
+// ============================================
+FUNCTION ControlDimmer(STRING deviceId, INTEGER level)
+{
+    INTEGER index;
+    
+    IF(!ModuleInitialized)
+    {
+        ErrorMessageOutput = "Module not initialized";
+        ModuleError = 1;
+        return;
+    }
+    
+    index = FindDeviceByIndex(deviceId);
+    
+    IF(index = 0)
+    {
+        ErrorMessageOutput = "Dimmer device not found: " + deviceId;
+        ModuleError = 1;
+        return;
+    }
+    
+    IF(RegisteredDevices[index].DeviceType <> DEVICE_TYPE_DIMMER)
+    {
+        ErrorMessageOutput = "Device is not a dimmer";
+        ModuleError = 1;
+        return;
+    }
+    
+    // Clamp level to 0-100
+    IF(level < 0) level = 0;
+    IF(level > 100) level = 100;
+    
+    RegisteredDevices[index].LastKnownLevel = level;
+    DimmerLevelOutput[index] = level;
+    
+    ErrorMessageOutput = "Dimmer set to " + Itoa(level) + "%: " + RegisteredDevices[index].DeviceName;
+    ModuleError = 0;
+}
+
+// ============================================
+// Fan Control Functions
+// ============================================
+FUNCTION ControlFan(STRING deviceId, INTEGER fanSpeed)
+{
+    INTEGER index;
+    
+    IF(!ModuleInitialized)
+    {
+        ErrorMessageOutput = "Module not initialized";
+        ModuleError = 1;
+        return;
+    }
+    
+    index = FindDeviceByIndex(deviceId);
+    
+    IF(index = 0)
+    {
+        ErrorMessageOutput = "Fan device not found: " + deviceId;
+        ModuleError = 1;
+        return;
+    }
+    
+    IF(RegisteredDevices[index].DeviceType <> DEVICE_TYPE_FAN)
+    {
+        ErrorMessageOutput = "Device is not a fan";
+        ModuleError = 1;
+        return;
+    }
+    
+    // Clamp speed to 0-3
+    IF(fanSpeed < 0) fanSpeed = 0;
+    IF(fanSpeed > 3) fanSpeed = 3;
+    
+    RegisteredDevices[index].LastKnownLevel = fanSpeed;
+    FanSpeedOutput[index] = fanSpeed;
+    
+    SWITCH(fanSpeed)
+    {
+        CASE(0):
+            ErrorMessageOutput = "Fan OFF: " + RegisteredDevices[index].DeviceName;
+        CASE(1):
+            ErrorMessageOutput = "Fan LOW: " + RegisteredDevices[index].DeviceName;
+        CASE(2):
+            ErrorMessageOutput = "Fan MEDIUM: " + RegisteredDevices[index].DeviceName;
+        CASE(3):
+            ErrorMessageOutput = "Fan HIGH: " + RegisteredDevices[index].DeviceName;
+    }
+    
+    ModuleError = 0;
+}
+
+// ============================================
+// Event Handlers
+// ============================================
+CHANGE Initialize
+{
+    IF(Initialize)
+        InitializeModule();
+}
+
+CHANGE Shutdown
+{
+    IF(Shutdown)
+        ShutdownModule();
+}
+
+CHANGE AddDeviceAsSwitch
+{
+    IF(AddDeviceAsSwitch)
+        AddDevice(DEVICE_TYPE_SWITCH);
+}
+
+CHANGE AddDeviceAsDimmer
+{
+    IF(AddDeviceAsDimmer)
+        AddDevice(DEVICE_TYPE_DIMMER);
+}
+
+CHANGE AddDeviceAsFan
+{
+    IF(AddDeviceAsFan)
+        AddDevice(DEVICE_TYPE_FAN);
+}
+
+CHANGE RemoveDevice
+{
+    IF(RemoveDevice)
+    {
+        INTEGER index;
+        index = FindDeviceByIndex(DeviceIdInput);
+        IF(index > 0)
+            RemoveDeviceByIndex(index);
+        ELSE
+        {
+            ErrorMessageOutput = "Device not found: " + DeviceIdInput;
+            ModuleError = 1;
+        }
+    }
+}
+
+CHANGE SwitchOn
+{
+    IF(SwitchOn)
+        ControlSwitch(SwitchControlDeviceId, 1);
+}
+
+CHANGE SwitchOff
+{
+    IF(SwitchOff)
+        ControlSwitch(SwitchControlDeviceId, 0);
+}
+
+CHANGE SwitchToggle
+{
+    IF(SwitchToggle)
+    {
+        INTEGER index;
+        index = FindDeviceByIndex(SwitchControlDeviceId);
+        IF(index > 0)
+            ControlSwitch(SwitchControlDeviceId, 1 - RegisteredDevices[index].LastKnownState);
+    }
+}
+
+CHANGE DimmerLevel
+{
+    IF(DimmerLevel >= 0 && DimmerLevel <= 100)
+        ControlDimmer(DimmerControlDeviceId, DimmerLevel);
+}
+
+CHANGE DimmerOn
+{
+    IF(DimmerOn)
+        ControlDimmer(DimmerControlDeviceId, 100);
+}
+
+CHANGE DimmerOff
+{
+    IF(DimmerOff)
+        ControlDimmer(DimmerControlDeviceId, 0);
+}
+
+CHANGE FanOff
+{
+    IF(FanOff)
+        ControlFan(FanControlDeviceId, 0);
+}
+
+CHANGE FanLow
+{
+    IF(FanLow)
+        ControlFan(FanControlDeviceId, 1);
+}
+
+CHANGE FanMedium
+{
+    IF(FanMedium)
+        ControlFan(FanControlDeviceId, 2);
+}
+
+CHANGE FanHigh
+{
+    IF(FanHigh)
+        ControlFan(FanControlDeviceId, 3);
+}
