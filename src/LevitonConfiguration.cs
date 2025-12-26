@@ -5,306 +5,179 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace Crestron.Leviton.Driver
+namespace CrestronLevitonDriver
 {
     /// <summary>
-    /// Provides secure credential storage and configuration management for Leviton devices.
-    /// Implements encryption/decryption of sensitive data and configuration persistence.
+    /// Manages secure credential storage and configuration for Leviton integration.
+    /// Implements encryption for sensitive data and provides configuration validation.
     /// </summary>
     public class LevitonConfiguration
     {
-        private const string CONFIG_FILE_NAME = "leviton-config.json";
-        private const string ENCRYPTION_KEY_FILE = ".leviton-key";
-        private const string ALGORITHM = "AES256";
-        private const int KEY_SIZE = 32; // 256 bits
-        private const int IV_SIZE = 16;  // 128 bits
-
-        private readonly string _configDirectory;
-        private readonly Dictionary<string, object> _configuration;
+        private readonly string _configPath;
+        private readonly string _encryptionKeyPath;
+        private Dictionary<string, string> _configuration;
         private byte[] _encryptionKey;
 
-        /// <summary>
-        /// Initializes a new instance of the LevitonConfiguration class.
-        /// </summary>
-        /// <param name="configDirectory">Directory where configuration files will be stored</param>
-        public LevitonConfiguration(string configDirectory = null)
+        public LevitonConfiguration(string configPath = "./config/leviton.json")
         {
-            _configDirectory = configDirectory ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Crestron", "Leviton");
-
-            _configuration = new Dictionary<string, object>();
-
-            if (!Directory.Exists(_configDirectory))
-            {
-                Directory.CreateDirectory(_configDirectory);
-            }
-
+            _configPath = configPath;
+            _encryptionKeyPath = Path.Combine(Path.GetDirectoryName(configPath), ".key");
+            _configuration = new Dictionary<string, string>();
             InitializeEncryption();
         }
 
         /// <summary>
-        /// Initializes or loads the encryption key.
+        /// Initializes or loads the encryption key for credential storage.
         /// </summary>
         private void InitializeEncryption()
         {
-            string keyFilePath = Path.Combine(_configDirectory, ENCRYPTION_KEY_FILE);
-
-            if (File.Exists(keyFilePath))
+            try
             {
-                _encryptionKey = File.ReadAllBytes(keyFilePath);
-                if (_encryptionKey.Length != KEY_SIZE)
+                if (File.Exists(_encryptionKeyPath))
                 {
-                    throw new InvalidOperationException("Invalid encryption key size in stored key file.");
+                    _encryptionKey = File.ReadAllBytes(_encryptionKeyPath);
+                }
+                else
+                {
+                    _encryptionKey = GenerateEncryptionKey();
+                    SaveEncryptionKey();
                 }
             }
-            else
+            catch (Exception ex)
             {
-                _encryptionKey = GenerateEncryptionKey();
-                try
-                {
-                    File.WriteAllBytes(keyFilePath, _encryptionKey);
-                    // Restrict file access to current user only
-                    var fileInfo = new FileInfo(keyFilePath);
-                    var fileSecurity = fileInfo.GetAccessControl();
-                    fileInfo.SetAccessControl(fileSecurity);
-                }
-                catch (Exception ex)
-                {
-                    throw new InvalidOperationException("Failed to save encryption key.", ex);
-                }
+                throw new InvalidOperationException("Failed to initialize encryption key.", ex);
             }
         }
 
         /// <summary>
-        /// Generates a new encryption key using cryptographically secure random.
+        /// Generates a new encryption key using a cryptographically secure method.
         /// </summary>
-        /// <returns>A new encryption key of 256 bits</returns>
         private byte[] GenerateEncryptionKey()
         {
             using (var rng = new RNGCryptoServiceProvider())
             {
-                byte[] key = new byte[KEY_SIZE];
+                byte[] key = new byte[32]; // 256-bit key for AES
                 rng.GetBytes(key);
                 return key;
             }
         }
 
         /// <summary>
-        /// Encrypts a string value using AES-256 encryption.
+        /// Saves the encryption key to disk with restricted permissions.
         /// </summary>
-        /// <param name="plainText">The text to encrypt</param>
-        /// <returns>Base64-encoded encrypted data with IV prefix</returns>
-        public string EncryptValue(string plainText)
+        private void SaveEncryptionKey()
         {
-            if (string.IsNullOrEmpty(plainText))
-                return plainText;
-
             try
             {
-                using (var aes = new AesCryptoServiceProvider())
+                var directory = Path.GetDirectoryName(_encryptionKeyPath);
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                File.WriteAllBytes(_encryptionKeyPath, _encryptionKey);
+
+                // Set file permissions to read-only for owner
+                var fileInfo = new FileInfo(_encryptionKeyPath);
+                fileInfo.Attributes = FileAttributes.Hidden;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException("Failed to save encryption key.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Encrypts sensitive data using AES encryption.
+        /// </summary>
+        public string EncryptCredential(string plainText)
+        {
+            try
+            {
+                using (var aes = Aes.Create())
                 {
                     aes.Key = _encryptionKey;
-                    aes.GenerateIV();
+                    aes.Mode = CipherMode.CBC;
+                    aes.Padding = PaddingMode.PKCS7;
 
                     using (var encryptor = aes.CreateEncryptor(aes.Key, aes.IV))
-                    using (var ms = new MemoryStream())
                     {
-                        // Write IV to the beginning of the stream
-                        ms.Write(aes.IV, 0, aes.IV.Length);
+                        byte[] plainBytes = Encoding.UTF8.GetBytes(plainText);
+                        byte[] encryptedBytes = encryptor.TransformFinalBlock(plainBytes, 0, plainBytes.Length);
 
-                        using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
-                        using (var sw = new StreamWriter(cs, Encoding.UTF8))
-                        {
-                            sw.Write(plainText);
-                        }
+                        // Combine IV and encrypted data
+                        byte[] result = new byte[aes.IV.Length + encryptedBytes.Length];
+                        Buffer.BlockCopy(aes.IV, 0, result, 0, aes.IV.Length);
+                        Buffer.BlockCopy(encryptedBytes, 0, result, aes.IV.Length, encryptedBytes.Length);
 
-                        return Convert.ToBase64String(ms.ToArray());
+                        return Convert.ToBase64String(result);
                     }
                 }
             }
             catch (Exception ex)
             {
-                throw new InvalidOperationException("Encryption failed.", ex);
+                throw new InvalidOperationException("Failed to encrypt credential.", ex);
             }
         }
 
         /// <summary>
-        /// Decrypts an encrypted string value.
+        /// Decrypts sensitive data using AES encryption.
         /// </summary>
-        /// <param name="encryptedText">Base64-encoded encrypted data with IV prefix</param>
-        /// <returns>The decrypted plaintext</returns>
-        public string DecryptValue(string encryptedText)
+        public string DecryptCredential(string encryptedText)
         {
-            if (string.IsNullOrEmpty(encryptedText))
-                return encryptedText;
-
             try
             {
-                byte[] encryptedData = Convert.FromBase64String(encryptedText);
+                byte[] buffer = Convert.FromBase64String(encryptedText);
 
-                using (var aes = new AesCryptoServiceProvider())
+                using (var aes = Aes.Create())
                 {
                     aes.Key = _encryptionKey;
+                    aes.Mode = CipherMode.CBC;
+                    aes.Padding = PaddingMode.PKCS7;
 
-                    // Extract IV from the beginning of the data
-                    byte[] iv = new byte[IV_SIZE];
-                    Array.Copy(encryptedData, 0, iv, 0, IV_SIZE);
+                    // Extract IV from the beginning of the buffer
+                    byte[] iv = new byte[aes.IV.Length];
+                    Buffer.BlockCopy(buffer, 0, iv, 0, iv.Length);
                     aes.IV = iv;
 
+                    byte[] encryptedBytes = new byte[buffer.Length - iv.Length];
+                    Buffer.BlockCopy(buffer, iv.Length, encryptedBytes, 0, encryptedBytes.Length);
+
                     using (var decryptor = aes.CreateDecryptor(aes.Key, aes.IV))
-                    using (var ms = new MemoryStream(encryptedData, IV_SIZE, encryptedData.Length - IV_SIZE))
-                    using (var cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read))
-                    using (var sr = new StreamReader(cs, Encoding.UTF8))
                     {
-                        return sr.ReadToEnd();
+                        byte[] decryptedBytes = decryptor.TransformFinalBlock(encryptedBytes, 0, encryptedBytes.Length);
+                        return Encoding.UTF8.GetString(decryptedBytes);
                     }
                 }
             }
             catch (Exception ex)
             {
-                throw new InvalidOperationException("Decryption failed.", ex);
+                throw new InvalidOperationException("Failed to decrypt credential.", ex);
             }
         }
 
         /// <summary>
-        /// Sets a configuration value with optional encryption.
+        /// Loads configuration from JSON file.
         /// </summary>
-        /// <param name="key">Configuration key</param>
-        /// <param name="value">Configuration value</param>
-        /// <param name="encrypt">Whether to encrypt the value</param>
-        public void Set(string key, object value, bool encrypt = false)
-        {
-            if (string.IsNullOrEmpty(key))
-                throw new ArgumentNullException(nameof(key));
-
-            if (encrypt && value is string stringValue)
-            {
-                _configuration[key] = new EncryptedValue { 
-                    IsEncrypted = true, 
-                    Value = EncryptValue(stringValue) 
-                };
-            }
-            else
-            {
-                _configuration[key] = value;
-            }
-        }
-
-        /// <summary>
-        /// Gets a configuration value, decrypting if necessary.
-        /// </summary>
-        /// <param name="key">Configuration key</param>
-        /// <param name="defaultValue">Default value if key not found</param>
-        /// <returns>The configuration value, decrypted if it was encrypted</returns>
-        public object Get(string key, object defaultValue = null)
-        {
-            if (!_configuration.TryGetValue(key, out var value))
-                return defaultValue;
-
-            if (value is EncryptedValue encryptedValue && encryptedValue.IsEncrypted)
-            {
-                return DecryptValue(encryptedValue.Value);
-            }
-
-            return value;
-        }
-
-        /// <summary>
-        /// Gets a configuration value as a string.
-        /// </summary>
-        /// <param name="key">Configuration key</param>
-        /// <param name="defaultValue">Default value if key not found</param>
-        /// <returns>The configuration value as string</returns>
-        public string GetString(string key, string defaultValue = null)
-        {
-            return Get(key, defaultValue) as string ?? defaultValue;
-        }
-
-        /// <summary>
-        /// Gets a configuration value as an integer.
-        /// </summary>
-        /// <param name="key">Configuration key</param>
-        /// <param name="defaultValue">Default value if key not found</param>
-        /// <returns>The configuration value as integer</returns>
-        public int GetInt(string key, int defaultValue = 0)
-        {
-            var value = Get(key);
-            if (value == null)
-                return defaultValue;
-
-            if (int.TryParse(value.ToString(), out int result))
-                return result;
-
-            return defaultValue;
-        }
-
-        /// <summary>
-        /// Gets a configuration value as a boolean.
-        /// </summary>
-        /// <param name="key">Configuration key</param>
-        /// <param name="defaultValue">Default value if key not found</param>
-        /// <returns>The configuration value as boolean</returns>
-        public bool GetBool(string key, bool defaultValue = false)
-        {
-            var value = Get(key);
-            if (value == null)
-                return defaultValue;
-
-            if (bool.TryParse(value.ToString(), out bool result))
-                return result;
-
-            return defaultValue;
-        }
-
-        /// <summary>
-        /// Saves the configuration to disk in JSON format.
-        /// </summary>
-        public void Save()
+        public bool LoadConfiguration()
         {
             try
             {
-                string configPath = Path.Combine(_configDirectory, CONFIG_FILE_NAME);
-                var json = JsonSerializer.Serialize(_configuration, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(configPath, json, Encoding.UTF8);
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException("Failed to save configuration.", ex);
-            }
-        }
-
-        /// <summary>
-        /// Loads the configuration from disk.
-        /// </summary>
-        public void Load()
-        {
-            try
-            {
-                string configPath = Path.Combine(_configDirectory, CONFIG_FILE_NAME);
-                if (!File.Exists(configPath))
-                    return;
-
-                var json = File.ReadAllText(configPath, Encoding.UTF8);
-                var loaded = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-
-                if (loaded != null)
+                if (!File.Exists(_configPath))
                 {
-                    _configuration.Clear();
-                    foreach (var kvp in loaded)
+                    return false;
+                }
+
+                string jsonContent = File.ReadAllText(_configPath);
+                using (JsonDocument doc = JsonDocument.Parse(jsonContent))
+                {
+                    foreach (var property in doc.RootElement.EnumerateObject())
                     {
-                        // Re-deserialize nested encrypted values properly
-                        if (kvp.Value is JsonElement element && element.ValueKind == JsonValueKind.Object)
-                        {
-                            var encryptedValue = JsonSerializer.Deserialize<EncryptedValue>(element.GetRawText());
-                            _configuration[kvp.Key] = encryptedValue;
-                        }
-                        else
-                        {
-                            _configuration[kvp.Key] = kvp.Value;
-                        }
+                        _configuration[property.Name] = property.Value.GetString();
                     }
                 }
+
+                return ValidateConfiguration();
             }
             catch (Exception ex)
             {
@@ -313,39 +186,155 @@ namespace Crestron.Leviton.Driver
         }
 
         /// <summary>
-        /// Clears all configuration values.
+        /// Saves configuration to JSON file.
         /// </summary>
-        public void Clear()
+        public void SaveConfiguration()
         {
+            try
+            {
+                var directory = Path.GetDirectoryName(_configPath);
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                string jsonContent = JsonSerializer.Serialize(_configuration, options);
+                File.WriteAllText(_configPath, jsonContent);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException("Failed to save configuration.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Sets a configuration value with optional encryption for sensitive data.
+        /// </summary>
+        public void SetValue(string key, string value, bool encrypt = false)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                throw new ArgumentException("Configuration key cannot be null or empty.", nameof(key));
+            }
+
+            string storageValue = encrypt ? EncryptCredential(value) : value;
+            _configuration[key] = storageValue;
+        }
+
+        /// <summary>
+        /// Gets a configuration value with optional decryption for sensitive data.
+        /// </summary>
+        public string GetValue(string key, bool decrypt = false, string defaultValue = null)
+        {
+            if (!_configuration.ContainsKey(key))
+            {
+                return defaultValue;
+            }
+
+            string value = _configuration[key];
+            return decrypt ? DecryptCredential(value) : value;
+        }
+
+        /// <summary>
+        /// Validates that all required configuration values are present and valid.
+        /// </summary>
+        private bool ValidateConfiguration()
+        {
+            var requiredKeys = new[] { "host", "port", "username" };
+
+            foreach (var key in requiredKeys)
+            {
+                if (!_configuration.ContainsKey(key) || string.IsNullOrWhiteSpace(_configuration[key]))
+                {
+                    return false;
+                }
+            }
+
+            // Validate port is a valid number
+            if (_configuration.ContainsKey("port"))
+            {
+                if (!int.TryParse(_configuration["port"], out int port) || port <= 0 || port > 65535)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Gets the Leviton host address.
+        /// </summary>
+        public string Host => GetValue("host");
+
+        /// <summary>
+        /// Gets the Leviton connection port.
+        /// </summary>
+        public int Port
+        {
+            get
+            {
+                string portValue = GetValue("port");
+                return int.TryParse(portValue, out int port) ? port : 8080;
+            }
+        }
+
+        /// <summary>
+        /// Gets the Leviton username.
+        /// </summary>
+        public string Username => GetValue("username");
+
+        /// <summary>
+        /// Gets the encrypted Leviton password.
+        /// </summary>
+        public string Password => GetValue("password", decrypt: true);
+
+        /// <summary>
+        /// Gets the API key if configured (decrypted).
+        /// </summary>
+        public string ApiKey => GetValue("api_key", decrypt: true);
+
+        /// <summary>
+        /// Gets the connection timeout in milliseconds.
+        /// </summary>
+        public int ConnectionTimeout
+        {
+            get
+            {
+                string timeoutValue = GetValue("connection_timeout");
+                return int.TryParse(timeoutValue, out int timeout) ? timeout : 5000;
+            }
+        }
+
+        /// <summary>
+        /// Gets whether SSL/TLS is enabled.
+        /// </summary>
+        public bool UseSSL
+        {
+            get
+            {
+                string sslValue = GetValue("use_ssl", defaultValue: "false");
+                return bool.TryParse(sslValue, out bool useSSL) ? useSSL : false;
+            }
+        }
+
+        /// <summary>
+        /// Gets all configuration keys (non-sensitive).
+        /// </summary>
+        public IEnumerable<string> GetKeys() => _configuration.Keys;
+
+        /// <summary>
+        /// Clears all sensitive data from memory.
+        /// </summary>
+        public void ClearSensitiveData()
+        {
+            if (_encryptionKey != null)
+            {
+                Array.Clear(_encryptionKey, 0, _encryptionKey.Length);
+            }
+
             _configuration.Clear();
-        }
-
-        /// <summary>
-        /// Gets all configuration keys.
-        /// </summary>
-        /// <returns>Array of configuration keys</returns>
-        public string[] GetKeys()
-        {
-            return _configuration.Keys.ToArray();
-        }
-
-        /// <summary>
-        /// Removes a configuration value.
-        /// </summary>
-        /// <param name="key">Configuration key to remove</param>
-        /// <returns>True if the key was removed, false if it didn't exist</returns>
-        public bool Remove(string key)
-        {
-            return _configuration.Remove(key);
-        }
-
-        /// <summary>
-        /// Internal class for storing encrypted values with metadata.
-        /// </summary>
-        private class EncryptedValue
-        {
-            public bool IsEncrypted { get; set; }
-            public string Value { get; set; }
         }
     }
 }
