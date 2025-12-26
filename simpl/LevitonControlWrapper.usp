@@ -64,18 +64,6 @@ INTEGER TotalDevices;
 INTEGER ModuleInitialized;
 
 // ============================================
-// Module Declaration (for future C# integration)
-// ============================================
-// This is a placeholder for the C# LevitonModule class
-// In production, uncomment and configure:
-// 
-// LevitonModule _levitonModule;
-// 
-// PUBLIC DELEGATE OnDeviceStateChanged(LevitonDevice device);
-// PUBLIC DELEGATE OnAuthenticationStateChanged(STRING message);
-//
-
-// ============================================
 // Initialize Function
 // ============================================
 FUNCTION InitializeModule()
